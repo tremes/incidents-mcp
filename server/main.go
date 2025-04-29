@@ -2,37 +2,29 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
-	mcpGolang "github.com/metoro-io/mcp-golang"
-	"github.com/metoro-io/mcp-golang/transport/http"
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 	"github.com/prometheus/client_golang/api"
 	v1 "github.com/prometheus/client_golang/api/prometheus/v1"
 )
 
-type IncidentArgs struct {
-	// TODO we probably need to pass time - how far back in history we want go
-	Name string `json:"name" jsonschema:"required,description=The name to say hello to"`
-}
-
 func main() {
-
 	parentCtx := context.Background()
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 	addr := "localhost:8081"
 
-	transport := http.NewHTTPTransport("/mcp").WithAddr(addr)
-	server := mcpGolang.NewServer(transport, mcpGolang.WithName("mcp-incidents-prototype"), mcpGolang.WithVersion("0.0.1"))
+	mcpServer := server.NewMCPServer("incidents-mcp", "0.0.1", server.WithToolCapabilities(true))
+	sseServer := server.NewSSEServer(mcpServer, server.WithBaseURL(fmt.Sprintf("http://%s", addr)))
 
-	err := server.RegisterTool("incidents", "Prints list of active incidents in the cluster", incidentTool)
-	if err != nil {
-		log.Fatalf("Failed to register incidents tool: %v ", err)
-	}
+	mcpServer.AddTool(mcp.NewTool("incidents"), handleIncidentTool)
 
 	go func() {
-		err = server.Serve()
+		err := sseServer.Start(addr)
 		if err != nil {
 			log.Fatalf("Failed to run the MCP server: %v", err)
 		}
@@ -42,31 +34,57 @@ func main() {
 	<-ctx.Done()
 }
 
-func incidentTool(args IncidentArgs) (*mcpGolang.ToolResponse, error) {
-	log.Printf("Incidents tool called with arguments: %s\n", args)
+func handleIncidentTool(
+	ctx context.Context,
+	request mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	arguments := request.Params.Arguments
+	component := arguments["component"]
+	qTime, ok := arguments["time"].(string)
+	d := 24 * time.Hour
+	if ok {
+		durationArg, err := time.ParseDuration(qTime)
+		if err != nil {
+			return nil, err
+		}
+		d = durationArg
+	}
+
+	promQuery := "cluster:health:components:map{}"
+	if component != nil {
+		promQuery = fmt.Sprintf(`cluster:health:components:map{"component"="%s"}`, component)
+	}
+	fmt.Println("Component: ", arguments["component"])
+	fmt.Println("Time: ", arguments["time"])
+
 	api_config := api.Config{
 		Address: "http://localhost:8080",
 	}
-
 	/* 	certs := x509.NewCertPool()
-	   	certs.AppendCertsFromPEM([]byte(promCert))
-	   	defaultRt := api.DefaultRoundTripper.(*http.Transport)
-	   	defaultRt.TLSClientConfig = &tls.Config{RootCAs: certs}
+	   certs.AppendCertsFromPEM([]byte(promCert))
+	   defaultRt := api.DefaultRoundTripper.(*http.Transport)
+	   defaultRt.TLSClientConfig = &tls.Config{RootCAs: certs}
 
-	   	api_config.RoundTripper = promConfig.NewAuthorizationCredentialsRoundTripper(
-	   		"Bearer", promConfig.NewInlineSecret(promToken), defaultRt)
+	   api_config.RoundTripper = promConfig.NewAuthorizationCredentialsRoundTripper(
+		   "Bearer", promConfig.NewInlineSecret(promToken), defaultRt)
 	*/
 	promClient, err := api.NewClient(api_config)
 	if err != nil {
-		log.Fatalf("Failed to create a new Prometheus client: %v", err)
+		return nil, err
 	}
 
 	promAPI := v1.NewAPI(promClient)
 
-	incidentsData, _, err := promAPI.Query(context.Background(), `cluster:health:components:map{}`, time.Now().Add(-1*time.Minute))
+	incidentsData, _, err := promAPI.Query(ctx, promQuery, time.Now().Add(d))
 	if err != nil {
 		return nil, err
 	}
-	incidentsAsText := mcpGolang.NewTextContent(incidentsData.String())
-	return mcpGolang.NewToolResponse(incidentsAsText), nil
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			mcp.TextContent{
+				Type: "text",
+				Text: incidentsData.String(),
+			},
+		},
+	}, nil
 }
