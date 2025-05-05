@@ -21,7 +21,9 @@ func main() {
 	mcpServer := server.NewMCPServer("incidents-mcp", "0.0.1", server.WithToolCapabilities(true))
 	sseServer := server.NewSSEServer(mcpServer, server.WithBaseURL(fmt.Sprintf("http://%s", addr)))
 
-	mcpServer.AddTool(mcp.NewTool("incidents"), handleIncidentTool)
+	mcpServer.AddTool(mcp.NewTool("incidents",
+		mcp.WithDescription("Incidents provides list of active incidents in the cluster.")),
+		handleIncidentTool)
 
 	go func() {
 		err := sseServer.Start(addr)
@@ -54,8 +56,8 @@ func handleIncidentTool(
 	if component != nil {
 		promQuery = fmt.Sprintf(`cluster:health:components:map{"component"="%s"}`, component)
 	}
-	fmt.Println("Component: ", arguments["component"])
-	fmt.Println("Time: ", arguments["time"])
+	fmt.Println("Component: ", component)
+	fmt.Println("Time: ", d)
 
 	api_config := api.Config{
 		Address: "http://localhost:8080",
@@ -83,7 +85,7 @@ func handleIncidentTool(
 		Content: []mcp.Content{
 			mcp.TextContent{
 				Type: "text",
-				Text: incidentsData.String(),
+				Text: fmt.Sprintf("The incidents data is %s", incidentsData.String()),
 			},
 		},
 	}, nil
